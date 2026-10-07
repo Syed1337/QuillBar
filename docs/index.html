@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quillbar — rewrite text in any Windows app</title>
+<meta name="description" content="Select text in WeChat, WhatsApp, Telegram, Outlook or any Windows app. Pick a tone. Quillbar rewrites it in place with your own AI key.">
+<meta property="og:title" content="Quillbar">
+<meta property="og:description" content="A one-line AI toolbar that rewrites selected text in place, in any Windows app.">
+<meta property="og:image" content="bar-dark.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --fog: #E9ECF2;
+  --paper: #F7F8FB;
+  --ink: #141821;
+  --slate: #5B6475;
+  --line: #D3D8E2;
+  --accent: #3E6BFF;
+  --select: #C9DBFF;
+  --bar: #1B1B1F;
+  --bar-line: #2E2E36;
+  --bar-text: #ECECF1;
+  --bar-dim: #8B8B96;
+  --bar-hover: #2A2A31;
+  --add-bg: #DDF5E6;
+  --add-fg: #11633A;
+  --del-fg: #C23B3B;
+  --radius-bar: 11px;
+  --wrap: 1080px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --fog: #12141A; --paper: #191C24; --ink: #ECEEF4; --slate: #9AA3B5; --line: #2A2F3B;
+    --accent: #7AA2FF; --select: #24406F; --add-bg: #1E3A2B; --add-fg: #8EE6B0; --del-fg: #FF8F8F;
+    --bar-line: #3A3F4D;
+  }
+}
+:root[data-theme="dark"] {
+  --fog: #12141A; --paper: #191C24; --ink: #ECEEF4; --slate: #9AA3B5; --line: #2A2F3B;
+  --accent: #7AA2FF; --select: #24406F; --add-bg: #1E3A2B; --add-fg: #8EE6B0; --del-fg: #FF8F8F;
+  --bar-line: #3A3F4D;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--fog); color: var(--ink);
+  font-family: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  font-size: 18px; line-height: 1.55; font-optical-sizing: auto;
+}
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+.wrap { max-width: var(--wrap); margin: 0 auto; padding: 0 24px; }
+@media (max-width: 600px) { .wrap { padding: 0 16px; } body { font-size: 17px; } }
+
+/* ---------- top */
+.top { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 20px; color: var(--ink); text-decoration: none; }
+.brand svg { width: 28px; height: 28px; }
+.top nav { display: flex; gap: 22px; font-size: 16px; }
+.top nav a { color: var(--slate); text-decoration: none; }
+.top nav a:hover { color: var(--ink); }
+
+/* ---------- hero: the headline is the demo */
+.hero { padding-top: 56px; padding-bottom: 72px; }
+.stage { position: relative; padding-top: 74px; }
+.pill {
+  position: absolute; top: 0; left: 0; display: inline-flex; align-items: center; gap: 2px;
+  background: var(--bar); border: 1px solid var(--bar-line); border-radius: var(--radius-bar);
+  padding: 5px; box-shadow: 0 10px 30px rgba(20, 24, 33, .28); max-width: 100%;
+  overflow-x: auto; scrollbar-width: none;
+}
+.pill::-webkit-scrollbar { display: none; }
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: #7AA2FF; margin: 0 10px 0 8px; flex: none; }
+.pill .sep { width: 1px; height: 18px; background: var(--bar-line); margin: 0 4px; flex: none; }
+.pill button {
+  font: 500 15px/1 "Bricolage Grotesque", "Segoe UI", sans-serif; color: var(--bar-text);
+  background: none; border: 0; border-radius: 7px; padding: 9px 11px; cursor: pointer; white-space: nowrap; flex: none;
+}
+.pill button span { color: var(--bar-dim); font-size: 12px; margin-right: 6px; }
+.pill button:hover, .pill button[aria-pressed="true"] { background: var(--bar-hover); }
+.pill button:disabled { opacity: .45; cursor: default; }
+.pill .busy { display: none; align-items: center; gap: 10px; color: var(--bar-text); font-size: 15px; padding: 0 12px 0 2px; }
+.pill.is-busy button, .pill.is-busy .sep { display: none; }
+.pill.is-busy .busy { display: inline-flex; }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--bar-line); border-top-color: #7AA2FF; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+h1 {
+  margin: 0; font-weight: 600; font-size: clamp(40px, 7.4vw, 92px);
+  line-height: 1.1; letter-spacing: -0.035em; max-width: 15ch; min-height: 2.2em;
+}
+/* selection band shorter than the line, so it never paints over the descenders above */
+h1 .sel { background-image: linear-gradient(var(--select), var(--select)); background-repeat: no-repeat;
+  background-size: 100% 1em; background-position: 0 55%; box-decoration-break: clone; -webkit-box-decoration-break: clone; padding: 0 .06em; }
+h1 .caret { display: inline-block; width: .06em; height: .9em; background: var(--ink); vertical-align: -.08em; margin-left: .04em; animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+h1[lang="zh"] { letter-spacing: 0; }
+
+.hint { color: var(--slate); font-size: 16px; margin: 18px 0 0; min-height: 1.5em; }
+.hint kbd { font: inherit; font-size: 13px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 0 6px; background: var(--paper); color: var(--ink); }
+.hint button { font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+
+.lede { font-size: clamp(19px, 2vw, 23px); line-height: 1.45; max-width: 36em; margin: 44px 0 28px; }
+.ctas { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.btn { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 17px; text-decoration: none; border-radius: 10px; padding: 13px 20px; }
+.btn.primary { background: var(--accent); color: #fff; }
+:root[data-theme="dark"] .btn.primary { color: #0B1020; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .btn.primary { color: #0B1020; } }
+.btn.ghost { color: var(--ink); border: 1px solid var(--line); background: var(--paper); }
+.btn.ghost:hover { border-color: var(--slate); }
+.small { color: var(--slate); font-size: 15px; }
+
+/* ---------- apps strip */
+.apps { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 18px 0; color: var(--slate); font-size: 17px; }
+.apps .wrap { display: flex; flex-wrap: wrap; gap: 6px 28px; }
+.apps strong { color: var(--ink); font-weight: 500; }
+
+/* ---------- sections */
+section.wrap { padding-top: 96px; }
+h2 { font-weight: 600; font-size: clamp(30px, 4vw, 46px); line-height: 1.1; letter-spacing: -0.025em; margin: 0 0 18px; max-width: 20ch; }
+h3 { font-weight: 600; font-size: 21px; margin: 0 0 6px; letter-spacing: -0.01em; }
+p { margin: 0 0 14px; max-width: 38em; }
+.muted { color: var(--slate); }
+
+.ways { display: grid; grid-template-columns: repeat(3, 1fr); gap: 36px; margin-top: 30px; }
+.ways kbd, .keys kbd { font: 500 14px/1 "Bricolage Grotesque", sans-serif; border: 1px solid var(--line); border-bottom-width: 3px; border-radius: 6px; padding: 5px 8px; background: var(--paper); color: var(--ink); display: inline-block; margin: 0 2px 10px 0; }
+@media (max-width: 800px) { .ways { grid-template-columns: 1fr; gap: 26px; } }
+
+.split { display: grid; grid-template-columns: 1fr 1.15fr; gap: 56px; align-items: center; }
+.split img { width: 100%; height: auto; display: block; }
+@media (max-width: 860px) { .split { grid-template-columns: 1fr; gap: 28px; } }
+.keys { margin-top: 18px; color: var(--slate); font-size: 16px; }
+
+.features { columns: 2; column-gap: 56px; margin: 30px 0 0; padding: 0; list-style: none; }
+.features li { break-inside: avoid; padding: 14px 0; border-top: 1px solid var(--line); }
+.features b { display: block; font-weight: 600; }
+.features span { color: var(--slate); font-size: 16px; }
+@media (max-width: 700px) { .features { columns: 1; } }
+
+.providers { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0 26px; padding: 0; list-style: none; }
+.providers li { border: 1px solid var(--line); background: var(--paper); border-radius: 999px; padding: 6px 14px; font-size: 16px; }
+
+ol.steps { counter-reset: s; list-style: none; padding: 0; margin: 28px 0 0; max-width: 46em; }
+ol.steps li { counter-increment: s; display: grid; grid-template-columns: 44px 1fr; gap: 8px; padding: 16px 0; border-top: 1px solid var(--line); }
+ol.steps li::before { content: counter(s); font-weight: 700; font-size: 22px; color: var(--accent); line-height: 1.3; }
+code { font-family: "Cascadia Code", Consolas, monospace; font-size: .86em; background: var(--paper); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; overflow-wrap: anywhere; }
+
+footer { margin-top: 96px; border-top: 1px solid var(--line); padding: 28px 0 48px; color: var(--slate); font-size: 15px; }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .spin, h1 .caret { animation: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#" aria-label="Quillbar home">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="15" fill="#1B1B1F"/><rect x="14" y="28" width="36" height="8" rx="4" fill="#7AA2FF"/><circle cx="44" cy="20" r="6" fill="#7AA2FF"/></svg>
+      Quillbar
+    </a>
+    <nav>
+      <a href="#install">Install</a>
+      <a href="https://github.com/Syed1337/QuillBar">GitHub</a>
+    </nav>
+  </header>
+</div>
+
+<main>
+  <div class="wrap hero">
+    <div class="stage">
+      <div class="pill" id="pill" role="toolbar" aria-label="Try Quillbar: rewrite the headline">
+        <i class="dot" aria-hidden="true"></i><i class="sep" aria-hidden="true"></i>
+        <button data-k="rewrite"><span>1</span>Rewrite</button>
+        <button data-k="formal"><span>2</span>Formal</button>
+        <button data-k="friendly"><span>3</span>Friendly</button>
+        <button data-k="shorter"><span>4</span>Shorter</button>
+        <button data-k="fix"><span>5</span>Fix</button>
+        <button data-k="translate"><span>6</span>Translate</button>
+        <div class="busy" aria-hidden="true"><i class="spin"></i><span id="busyLabel">Rewriting…</span></div>
+      </div>
+      <h1 id="headline" aria-live="polite"><span class="sel">hey can u make this sound better, its for my boss</span></h1>
+    </div>
+    <p class="hint" id="hint">That headline is selected text. Click a button, or press <kbd>1</kbd>–<kbd>6</kbd>.</p>
+
+    <p class="lede">Select text in any Windows app, pick a tone, and Quillbar rewrites it right where it is. One thin bar, your own AI key, and the result goes back into the exact window you were typing in.</p>
+    <div class="ctas">
+      <a class="btn primary" href="https://github.com/Syed1337/QuillBar/releases/latest">Download for Windows</a>
+      <a class="btn ghost" href="https://github.com/Syed1337/QuillBar">View source on GitHub</a>
+      <span class="small">Free and open source. Windows 10 and 11.</span>
+    </div>
+  </div>
+
+  <div class="apps" aria-label="Works in">
+    <div class="wrap">
+      <span>Works in</span>
+      <strong>WeChat</strong><strong>WhatsApp</strong><strong>Telegram</strong><strong>Outlook</strong>
+      <strong>Gmail</strong><strong>Slack</strong><strong>Teams</strong><strong>Word</strong><span>and anything else you can select text in</span>
+    </div>
+  </div>
+
+  <section class="wrap" aria-labelledby="ways">
+    <h2 id="ways">Three ways to call it up</h2>
+    <p class="muted">Use whichever fits the moment. All of them land the result back in the same chat box or email.</p>
+    <div class="ways">
+      <div>
+        <kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>Space</kbd>
+        <h3>Show the bar</h3>
+        <p class="muted">The bar appears next to your cursor. Click a button or press its number.</p>
+      </div>
+      <div>
+        <kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>F</kbd>
+        <h3>Skip the bar</h3>
+        <p class="muted">Every button can have its own shortcut. Press it and the text is rewritten instantly.</p>
+      </div>
+      <div>
+        <kbd>Select with the mouse</kbd>
+        <h3>Mouse mode</h3>
+        <p class="muted">Drag across text or double-click a word and the bar pops up. Nothing is copied until you click.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap" aria-labelledby="preview">
+    <div class="split">
+      <div>
+        <h2 id="preview">See the change before it lands</h2>
+        <p>For anything important, open the preview. The answer streams in, every changed word is marked, and you can ask for another pass in plain words: "shorter", "add a thank-you", "less stiff".</p>
+        <p class="keys"><kbd>Enter</kbd> replace <kbd>Tab</kbd> retry <kbd>C</kbd> copy <kbd>D</kbd> diff <kbd>Esc</kbd> close</p>
+      </div>
+      <img src="preview-diff.png" width="572" height="248" alt="Preview card showing a casual message rewritten, with removed words struck through and new words highlighted">
+    </div>
+  </section>
+
+  <section class="wrap" aria-labelledby="reply">
+    <div class="split">
+      <img src="smart-reply.png" width="572" height="232" alt="Reply card with a drafted answer and a Copy button">
+      <div>
+        <h2 id="reply">Reply, summarize, explain</h2>
+        <p>Select a message someone sent you and press Reply for a draft in the same language and tone. Summarize long email threads, pull out action items, or get a plain explanation of a message in another language.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap" aria-labelledby="more">
+    <h2 id="more">Built for the way you write</h2>
+    <ul class="features">
+      <li><b>Your own buttons</b><span>Write the instruction, give it a shortcut, choose replace, preview or copy.</span></li>
+      <li><b>Rules per app</b><span>Keep WeChat casual and short, keep Outlook's greeting and sign-off.</span></li>
+      <li><b>Your style</b><span>One note added to every request, like "British spelling, sign emails as Sam".</span></li>
+      <li><b>Two-way translate</b><span>English and Chinese, or any pair. It works out the direction itself.</span></li>
+      <li><b>Smart select</b><span>Nothing selected in a chat app? It uses the whole message box.</span></li>
+      <li><b>A model per button</b><span>A fast, cheap model for fixing typos and a stronger one for replies.</span></li>
+      <li><b>Masking</b><span>Optionally swaps emails, phone and card numbers for placeholders before sending.</span></li>
+      <li><b>Clipboard left alone</b><span>Whatever you had copied is put back after every replace.</span></li>
+      <li><b>History</b><span>This session's rewrites, kept in memory only and cleared when you quit.</span></li>
+      <li><b>Starts with Windows</b><span>Sits in the tray using next to no memory or CPU.</span></li>
+    </ul>
+  </section>
+
+  <section class="wrap" aria-labelledby="providers">
+    <h2 id="providers">Bring your own AI</h2>
+    <p>Quillbar talks to any OpenAI-compatible service. Paste a key, press Test, done. Your key is encrypted with your Windows account and only ever sent to the provider you chose.</p>
+    <ul class="providers">
+      <li>OpenAI</li><li>DeepSeek</li><li>Qwen</li><li>Kimi</li><li>Gemini</li><li>Claude</li>
+      <li>OpenRouter</li><li>Groq</li><li>DMXAPI</li><li>Ollama</li><li>LM Studio</li>
+    </ul>
+    <p class="muted">Ollama and LM Studio run on your own PC, so nothing leaves it at all.</p>
+  </section>
+
+  <section class="wrap" id="install" aria-labelledby="install-h">
+    <h2 id="install-h">Install in two minutes</h2>
+    <ol class="steps">
+      <li><div><h3>Download</h3><p class="muted">Get <code>Quillbar.exe</code> from <a href="https://github.com/Syed1337/QuillBar/releases/latest">Releases</a> and run it. If Windows SmartScreen warns you, choose More info, then Run anyway.</p></div></li>
+      <li><div><h3>Add your key</h3><p class="muted">Settings opens by itself. Pick a provider, paste your API key, press Fetch models, choose one and press Test.</p></div></li>
+      <li><div><h3>Select and rewrite</h3><p class="muted">Select text anywhere and press <code>Ctrl+Alt+Space</code>. Quillbar lives in the tray from now on.</p></div></li>
+    </ol>
+    <p class="small" style="margin-top:22px">Prefer Python? Download <code>quillbar.py</code> and <code>Start Quillbar.bat</code> into one folder and double-click the .bat.</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Quillbar is MIT licensed. Inspired by <a href="https://github.com/theJayTea/WritingTools">WritingTools</a>.</span>
+    <a href="https://github.com/Syed1337/QuillBar/issues">Report a problem</a>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var ORIGINAL = "hey can u make this sound better, its for my boss";
+  var OUT = {
+    rewrite:   ["Rewriting", "Hey, could you help this sound better? It’s for my boss."],
+    formal:    ["Formal", "Could you help me refine this message? It is for my manager."],
+    friendly:  ["Friendly", "Hey! Mind helping me polish this up? It’s going to my boss 🙂"],
+    shorter:   ["Shortening", "Can you polish this for my boss?"],
+    fix:       ["Fixing", "Hey, can you make this sound better? It’s for my boss."],
+    translate: ["Translating", "嘿，能帮我把这段话改得更好吗？是给老板的。"]
+  };
+  var pill = document.getElementById("pill");
+  var h1 = document.getElementById("headline");
+  var hint = document.getElementById("hint");
+  var busyLabel = document.getElementById("busyLabel");
+  var buttons = pill.querySelectorAll("button");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var running = false;
+
+  function setText(t, done) {
+    h1.textContent = "";
+    var span = document.createElement("span");
+    span.className = "sel";
+    span.textContent = t;
+    h1.appendChild(span);
+    if (!done) {
+      var c = document.createElement("i");
+      c.className = "caret";
+      h1.appendChild(c);
+    }
+  }
+
+  function run(key) {
+    if (running || !OUT[key]) return;
+    running = true;
+    var label = OUT[key][0], target = OUT[key][1];
+    buttons.forEach(function (b) { b.setAttribute("aria-pressed", b.dataset.k === key ? "true" : "false"); });
+    busyLabel.textContent = (label.endsWith("ing") ? label : label) + "…";
+    pill.classList.add("is-busy");
+    h1.lang = key === "translate" ? "zh" : "en";
+    var cjk = key === "translate";
+    var parts = cjk ? Array.from(target) : target.split(/(\s+)/);
+    setTimeout(function () {
+      pill.classList.remove("is-busy");
+      if (reduce) { setText(target, true); finish(); return; }
+      var i = 0, acc = "";
+      (function tick() {
+        acc += parts[i++] || "";
+        setText(acc, i >= parts.length);
+        if (i < parts.length) setTimeout(tick, cjk ? 55 : 45);
+        else finish();
+      })();
+    }, reduce ? 0 : 520);
+  }
+
+  function finish() {
+    running = false;
+    hint.innerHTML = "Replaced in place. In a real app, <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes it. <button type=\"button\" id=\"reset\">Put the original back</button>";
+    document.getElementById("reset").addEventListener("click", function () {
+      setText(ORIGINAL, true);
+      h1.lang = "en";
+      buttons.forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+      hint.innerHTML = "That headline is selected text. Click a button, or press <kbd>1</kbd>–<kbd>6</kbd>.";
+    });
+  }
+
+  buttons.forEach(function (b) {
+    b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", function () { run(b.dataset.k); });
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    var t = e.target.tagName;
+    if (t === "INPUT" || t === "TEXTAREA") return;
+    var n = parseInt(e.key, 10);
+    if (n >= 1 && n <= buttons.length) run(buttons[n - 1].dataset.k);
+  });
+})();
+</script>
+</body>
+</html>
