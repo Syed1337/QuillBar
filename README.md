@@ -83,8 +83,8 @@ All are presets in Settings. Press **Fetch models** to pick a model your key can
 ### Option 1: one click (needs Python)
 
 1. Install [Python 3.10+](https://www.python.org/downloads/) and tick **Add python.exe to PATH**.
-2. Download `quillbar.py` and `Start Quillbar.bat` into the same folder.
-3. Double-click **Start Quillbar.bat**. The first run installs the two dependencies.
+2. Download `quillbar.py` and `Start-Quillbar.bat` into the same folder.
+3. Double-click **Start-Quillbar.bat**. The first run installs the two dependencies.
 
 ### Option 2: standalone exe (no Python)
 
@@ -151,7 +151,7 @@ pip install -r requirements.txt pyinstaller
 pyinstaller --onefile --windowed --name Quillbar quillbar.py
 ```
 
-Output: `dist\Quillbar.exe`. Pushing a tag like `v1.0.0` builds it automatically and attaches it to a GitHub Release.
+Output: `dist\Quillbar.exe`. Pushing a tag like `v1.1` builds it automatically and attaches it to a GitHub Release.
 
 ## Development
 

@@ -22,5 +22,5 @@ jobs:
           files: |
             dist/Quillbar.exe
             quillbar.py
-            Start Quillbar.bat
+            Start-Quillbar.bat
           generate_release_notes: true
