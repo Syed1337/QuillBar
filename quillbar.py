@@ -3537,7 +3537,7 @@ def main() -> int:
     if not single_instance():
         QMessageBox.information(None, "Quillbar", "Quillbar is already running (see tray).")
         return 0
-    ctl = Controller(app)  # noqa: F841  keep reference
+    app.controller = Controller(app)  # keep a reference for the app lifetime
     return app.exec()
 
 
