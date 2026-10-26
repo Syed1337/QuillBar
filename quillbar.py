@@ -676,8 +676,10 @@ PROVIDER_PRESETS = {
 
 def new_provider(preset: str = "OpenAI") -> dict:
     base, model = PROVIDER_PRESETS.get(preset, PROVIDER_PRESETS["OpenAI"])
+    # Gemini thinks by default (slow for rewrites); "none" maps to its lowest level.
+    effort = "none" if preset == "Google Gemini" else ""
     return {"id": uuid.uuid4().hex[:8], "name": preset, "base_url": base,
-            "api_key": "", "model": model, "temperature": 0.4}
+            "api_key": "", "model": model, "temperature": 0.4, "reasoning_effort": effort}
 
 
 DEFAULTS = {
@@ -1003,6 +1005,9 @@ def _error_text(r: requests.Response, url: str = "") -> str:
     return f"HTTP {r.status_code}{' (' + hint + ')' if hint else ''}: {msg}{where}"
 
 
+_HTTP = requests.Session()  # keep-alive: skips a TCP+TLS handshake on every request
+
+
 def build_messages(system: str, instruction: str, text: str) -> list[dict]:
     user = (f"Instruction: {instruction}\n\n"
             "Return only the transformed text.\n\n"
@@ -1010,14 +1015,21 @@ def build_messages(system: str, instruction: str, text: str) -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def complete(provider: dict, system: str, instruction: str, text: str,
-             timeout: float = 60) -> str:
+def _body(provider: dict, system: str, instruction: str, text: str, stream: bool) -> dict:
     body = {"model": provider["model"],
             "messages": build_messages(system, instruction, text),
             "temperature": float(provider.get("temperature", 0.4)),
-            "stream": False}
+            "stream": stream}
+    if provider.get("reasoning_effort"):
+        body["reasoning_effort"] = provider["reasoning_effort"]
+    return body
+
+
+def complete(provider: dict, system: str, instruction: str, text: str,
+             timeout: float = 60) -> str:
+    body = _body(provider, system, instruction, text, False)
     try:
-        r, url = _with_v1_fallback(provider, "/chat/completions", lambda u: requests.post(
+        r, url = _with_v1_fallback(provider, "/chat/completions", lambda u: _HTTP.post(
             u, headers=_headers(provider), json=body, timeout=timeout))
     except requests.Timeout:
         raise LLMError("Request timed out")
@@ -1037,7 +1049,7 @@ def complete(provider: dict, system: str, instruction: str, text: str,
 
 def list_models(provider: dict, timeout: float = 15) -> list[str]:
     try:
-        r, url = _with_v1_fallback(provider, "/models", lambda u: requests.get(
+        r, url = _with_v1_fallback(provider, "/models", lambda u: _HTTP.get(
             u, headers=_headers(provider), timeout=timeout))
     except requests.RequestException as e:
         raise LLMError(f"Network error: {e.__class__.__name__}")
@@ -1084,12 +1096,9 @@ def stream(provider: dict, system: str, instruction: str, text: str, on_delta,
            cancelled=lambda: False, timeout: float = 60) -> str:
     """Streaming variant. Calls on_delta(chunk) as text arrives; returns cleaned text.
     Falls back transparently when a provider ignores stream=true."""
-    body = {"model": provider["model"],
-            "messages": build_messages(system, instruction, text),
-            "temperature": float(provider.get("temperature", 0.4)),
-            "stream": True}
+    body = _body(provider, system, instruction, text, True)
     try:
-        r, url = _with_v1_fallback(provider, "/chat/completions", lambda u: requests.post(
+        r, url = _with_v1_fallback(provider, "/chat/completions", lambda u: _HTTP.post(
             u, headers=_headers(provider), json=body, timeout=timeout, stream=True))
     except requests.Timeout:
         raise LLMError("Request timed out")
@@ -2512,11 +2521,16 @@ class SettingsDialog(QDialog):
         self.p_temp.setSingleStep(0.1)
         self.p_temp.setButtonSymbols(QDoubleSpinBox.NoButtons)
         self.p_temp.setFixedWidth(90)
+        self.p_effort = QComboBox()
+        for label, val in (("Model default", ""), ("None", "none"), ("Minimal", "minimal"),
+                           ("Low", "low"), ("Medium", "medium"), ("High", "high")):
+            self.p_effort.addItem(label, val)
         f.addRow("Name", self.p_name)
         f.addRow("Base URL", self.p_url)
         f.addRow("API key", key_row)
         f.addRow("Model", model_row)
         f.addRow("Temperature", self.p_temp)
+        f.addRow("Thinking", self.p_effort)
 
         act_row = QHBoxLayout()
         self.p_active = QPushButton("Use this provider")
@@ -2542,6 +2556,7 @@ class SettingsDialog(QDialog):
             getattr(wdg, sig).connect(self._store_provider)
         self.p_model.editTextChanged.connect(self._store_provider)
         self.p_temp.valueChanged.connect(self._store_provider)
+        self.p_effort.currentIndexChanged.connect(self._store_provider)
         self.plist.currentRowChanged.connect(self._load_provider)
         self._refresh_plist()
         return w
@@ -2572,6 +2587,7 @@ class SettingsDialog(QDialog):
         self.p_model.clear()
         self.p_model.setEditText(p["model"])
         self.p_temp.setValue(float(p.get("temperature", 0.4)))
+        self.p_effort.setCurrentIndex(max(0, self.p_effort.findData(p.get("reasoning_effort", ""))))
         active = p["id"] == self.d["active_provider"]
         self.p_active.setText("Active" if active else "Use this provider")
         self.p_active.setEnabled(not active)
@@ -2586,7 +2602,8 @@ class SettingsDialog(QDialog):
             return
         p.update(name=self.p_name.text().strip() or "Provider",
                  base_url=self.p_url.text().strip(), api_key=self.p_key.text().strip(),
-                 model=self.p_model.currentText().strip(), temperature=self.p_temp.value())
+                 model=self.p_model.currentText().strip(), temperature=self.p_temp.value(),
+                 reasoning_effort=self.p_effort.currentData() or "")
         item = self.plist.currentItem()
         if item:
             mark = "●  " if p["id"] == self.d["active_provider"] else "    "

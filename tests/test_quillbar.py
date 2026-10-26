@@ -88,7 +88,7 @@ def test_complete_against_fake_server(monkeypatch):
     def fake_post(url, headers, json, timeout):
         seen.update(url=url, headers=headers, body=json)
         return R()
-    monkeypatch.setattr(llm.requests, "post", fake_post)
+    monkeypatch.setattr(llm._HTTP, "post", fake_post)
     p = config.new_provider("DeepSeek")
     p["api_key"] = "k"
     out = llm.complete(p, "sys", "fix", "helo i am testting")
@@ -103,7 +103,7 @@ def test_error_message(monkeypatch):
         text = ""
         def json(self):
             return {"error": {"message": "Invalid key"}}
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(llm._HTTP, "post", lambda *a, **k: R())
     with pytest.raises(llm.LLMError, match="check API key"):
         llm.complete(config.new_provider(), "s", "i", "t")
 
@@ -134,7 +134,7 @@ def test_v1_fallback(monkeypatch):
         calls.append(url)
         return R(200 if "/v1/" in url else 404)
 
-    monkeypatch.setattr(llm.requests, "post", fake_post)
+    monkeypatch.setattr(llm._HTTP, "post", fake_post)
     p = config.new_provider("DMXAPI")
     p.update(base_url="https://www.dmxapi.cn", api_key="k")
     assert llm.complete(p, "s", "i", "t") == "Fixed."
@@ -152,7 +152,7 @@ def test_html_404_message(monkeypatch):
         def json(self):
             raise ValueError
 
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(llm._HTTP, "post", lambda *a, **k: R())
     p = config.new_provider()
     p.update(base_url="https://dmxapi.com/v1", api_key="k")
     with pytest.raises(llm.LLMError, match="web page"):
@@ -175,7 +175,7 @@ def test_www_fallback(monkeypatch):
         calls.append(url)
         return R(200 if url == "https://www.dmxapi.com/v1/chat/completions" else 404)
 
-    monkeypatch.setattr(llm.requests, "post", fake_post)
+    monkeypatch.setattr(llm._HTTP, "post", fake_post)
     p = config.new_provider()
     p.update(base_url="https://dmxapi.com/", api_key="k")
     assert llm.complete(p, "s", "i", "t") == "OK."
@@ -192,7 +192,7 @@ def test_no_channel_hint(monkeypatch):
         def json(self):
             return {"error": {"message": "No available channel for model gemini-2.0-flash"}}
 
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(llm._HTTP, "post", lambda *a, **k: R())
     with pytest.raises(llm.LLMError, match="Fetch models"):
         llm.complete(config.new_provider(), "s", "i", "t")
 
@@ -293,7 +293,7 @@ def test_stream_sse(monkeypatch):
         def iter_lines(self, decode_unicode=False):
             return iter(lines)
 
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(llm._HTTP, "post", lambda *a, **k: R())
     got = []
     out = llm.stream(_cfg().provider, "s", "i", "t", got.append)
     assert out == "Hello." and got == ["Hel", "lo."]
@@ -307,5 +307,25 @@ def test_stream_json_fallback(monkeypatch):
         def json(self):
             return {"choices": [{"message": {"content": "Whole."}}]}
 
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(llm._HTTP, "post", lambda *a, **k: R())
     assert llm.stream(_cfg().provider, "s", "i", "t", lambda d: None) == "Whole."
+
+
+def test_reasoning_effort(monkeypatch):
+    seen = {}
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "Done."}}]}
+
+    def fake_post(url, headers, json, timeout):
+        seen.update(body=json)
+        return R()
+    monkeypatch.setattr(llm._HTTP, "post", fake_post)
+    p = config.new_provider("Google Gemini")
+    p["api_key"] = "k"
+    assert llm.complete(p, "sys", "fix", "hola") == "Done."
+    assert seen["body"]["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in llm._body(config.new_provider("OpenAI"), "s", "i", "t", False)
