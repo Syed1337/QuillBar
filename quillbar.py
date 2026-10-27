@@ -674,10 +674,18 @@ PROVIDER_PRESETS = {
 }
 
 
+def default_effort(base_url: str) -> str:
+    """Gemini thinks on every call by default, which makes a short rewrite ~3x slower.
+    "none" turns thinking off on 2.5 and drops 3.x models to their lowest level.
+    Everything else keeps the model's own default (field not sent)."""
+    return "none" if "generativelanguage.googleapis.com" in (base_url or "") else ""
+
+
 def new_provider(preset: str = "OpenAI") -> dict:
     base, model = PROVIDER_PRESETS.get(preset, PROVIDER_PRESETS["OpenAI"])
     return {"id": uuid.uuid4().hex[:8], "name": preset, "base_url": base,
-            "api_key": "", "model": model, "temperature": 0.4}
+            "api_key": "", "model": model, "temperature": 0.4,
+            "reasoning_effort": default_effort(base)}
 
 
 DEFAULTS = {
@@ -725,6 +733,8 @@ class Config:
                 pass
         for p in data["providers"]:
             p["api_key"] = unprotect(p.pop("api_key_enc", "")) or p.get("api_key", "")
+            if "reasoning_effort" not in p:  # saved by 1.0: give Gemini the fast default
+                p["reasoning_effort"] = default_effort(p.get("base_url", ""))
         if not data["providers"]:
             p = new_provider("OpenAI")
             data["providers"] = [p]
@@ -1003,6 +1013,65 @@ def _error_text(r: requests.Response, url: str = "") -> str:
     return f"HTTP {r.status_code}{' (' + hint + ')' if hint else ''}: {msg}{where}"
 
 
+# One pooled session for the whole app: keep-alive skips a TCP+TLS handshake per request.
+_HTTP = requests.Session()
+# (base_url, model) pairs that rejected reasoning_effort; don't send it to them again.
+_NO_EFFORT: set[tuple[str, str]] = set()
+
+EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high")
+
+
+def _request(method: str, url: str, **kw) -> requests.Response:
+    """Send via the shared session. A pooled connection the server closed while we were
+    idle (e.g. after sleep) fails instantly; retry that once on a fresh connection."""
+    send = getattr(_HTTP, method)
+    try:
+        return send(url, **kw)
+    except requests.ConnectionError as e:
+        if isinstance(e, requests.Timeout):
+            raise
+        return send(url, **kw)
+
+
+def _effort_key(provider: dict) -> tuple[str, str]:
+    return normalize_base(provider.get("base_url", "")), provider.get("model", "")
+
+
+def _body(provider: dict, system: str, instruction: str, text: str, stream: bool) -> dict:
+    body = {"model": provider["model"],
+            "messages": build_messages(system, instruction, text),
+            "temperature": float(provider.get("temperature", 0.4)),
+            "stream": stream}
+    effort = (provider.get("reasoning_effort") or "").strip().lower()
+    if effort in EFFORT_LEVELS and _effort_key(provider) not in _NO_EFFORT:
+        body["reasoning_effort"] = effort
+    return body
+
+
+def _rejects_effort(r: requests.Response) -> bool:
+    if r.status_code not in (400, 422):
+        return False
+    try:
+        return "reasoning" in (r.text or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _post_chat(provider: dict, body: dict, timeout: float, stream: bool):
+    """POST /chat/completions. If the model rejects reasoning_effort, retry once without
+    it and remember that, so a wrong Thinking setting costs one round trip, not an error."""
+    extra = {"stream": True} if stream else {}
+
+    def send(payload):
+        return _with_v1_fallback(provider, "/chat/completions", lambda u: _request(
+            "post", u, headers=_headers(provider), json=payload, timeout=timeout, **extra))
+    r, url = send(body)
+    if "reasoning_effort" in body and _rejects_effort(r):
+        _NO_EFFORT.add(_effort_key(provider))
+        r, url = send({k: v for k, v in body.items() if k != "reasoning_effort"})
+    return r, url
+
+
 def build_messages(system: str, instruction: str, text: str) -> list[dict]:
     user = (f"Instruction: {instruction}\n\n"
             "Return only the transformed text.\n\n"
@@ -1012,13 +1081,9 @@ def build_messages(system: str, instruction: str, text: str) -> list[dict]:
 
 def complete(provider: dict, system: str, instruction: str, text: str,
              timeout: float = 60) -> str:
-    body = {"model": provider["model"],
-            "messages": build_messages(system, instruction, text),
-            "temperature": float(provider.get("temperature", 0.4)),
-            "stream": False}
+    body = _body(provider, system, instruction, text, False)
     try:
-        r, url = _with_v1_fallback(provider, "/chat/completions", lambda u: requests.post(
-            u, headers=_headers(provider), json=body, timeout=timeout))
+        r, url = _post_chat(provider, body, timeout, stream=False)
     except requests.Timeout:
         raise LLMError("Request timed out")
     except requests.RequestException as e:
@@ -1037,7 +1102,7 @@ def complete(provider: dict, system: str, instruction: str, text: str,
 
 def list_models(provider: dict, timeout: float = 15) -> list[str]:
     try:
-        r, url = _with_v1_fallback(provider, "/models", lambda u: requests.get(
+        r, url = _with_v1_fallback(provider, "/models", lambda u: _request("get", 
             u, headers=_headers(provider), timeout=timeout))
     except requests.RequestException as e:
         raise LLMError(f"Network error: {e.__class__.__name__}")
@@ -1084,13 +1149,9 @@ def stream(provider: dict, system: str, instruction: str, text: str, on_delta,
            cancelled=lambda: False, timeout: float = 60) -> str:
     """Streaming variant. Calls on_delta(chunk) as text arrives; returns cleaned text.
     Falls back transparently when a provider ignores stream=true."""
-    body = {"model": provider["model"],
-            "messages": build_messages(system, instruction, text),
-            "temperature": float(provider.get("temperature", 0.4)),
-            "stream": True}
+    body = _body(provider, system, instruction, text, True)
     try:
-        r, url = _with_v1_fallback(provider, "/chat/completions", lambda u: requests.post(
-            u, headers=_headers(provider), json=body, timeout=timeout, stream=True))
+        r, url = _post_chat(provider, body, timeout, stream=True)
     except requests.Timeout:
         raise LLMError("Request timed out")
     except requests.RequestException as e:
@@ -2512,11 +2573,22 @@ class SettingsDialog(QDialog):
         self.p_temp.setSingleStep(0.1)
         self.p_temp.setButtonSymbols(QDoubleSpinBox.NoButtons)
         self.p_temp.setFixedWidth(90)
+        self.p_effort = QComboBox()
+        for label, val in (("Model default", ""), ("Off (fastest)", "none"),
+                           ("Minimal", "minimal"), ("Low", "low"), ("Medium", "medium"),
+                           ("High", "high")):
+            self.p_effort.addItem(label, val)
+        self.p_effort.setFixedWidth(180)
+        self.p_effort.setToolTip(
+            "Sent as reasoning_effort. Off is fastest for rewrites. Gemini 3 can't fully "
+            "switch thinking off, so Off means its lowest level. If a model doesn't accept "
+            "the setting, Quillbar retries without it.")
         f.addRow("Name", self.p_name)
         f.addRow("Base URL", self.p_url)
         f.addRow("API key", key_row)
         f.addRow("Model", model_row)
         f.addRow("Temperature", self.p_temp)
+        f.addRow("Thinking", self.p_effort)
 
         act_row = QHBoxLayout()
         self.p_active = QPushButton("Use this provider")
@@ -2542,6 +2614,7 @@ class SettingsDialog(QDialog):
             getattr(wdg, sig).connect(self._store_provider)
         self.p_model.editTextChanged.connect(self._store_provider)
         self.p_temp.valueChanged.connect(self._store_provider)
+        self.p_effort.currentIndexChanged.connect(self._store_provider)
         self.plist.currentRowChanged.connect(self._load_provider)
         self._refresh_plist()
         return w
@@ -2572,6 +2645,7 @@ class SettingsDialog(QDialog):
         self.p_model.clear()
         self.p_model.setEditText(p["model"])
         self.p_temp.setValue(float(p.get("temperature", 0.4)))
+        self.p_effort.setCurrentIndex(max(0, self.p_effort.findData(p.get("reasoning_effort", ""))))
         active = p["id"] == self.d["active_provider"]
         self.p_active.setText("Active" if active else "Use this provider")
         self.p_active.setEnabled(not active)
@@ -2586,7 +2660,8 @@ class SettingsDialog(QDialog):
             return
         p.update(name=self.p_name.text().strip() or "Provider",
                  base_url=self.p_url.text().strip(), api_key=self.p_key.text().strip(),
-                 model=self.p_model.currentText().strip(), temperature=self.p_temp.value())
+                 model=self.p_model.currentText().strip(), temperature=self.p_temp.value(),
+                 reasoning_effort=self.p_effort.currentData() or "")
         item = self.plist.currentItem()
         if item:
             mark = "●  " if p["id"] == self.d["active_provider"] else "    "
