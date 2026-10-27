@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1 — unreleased
+
+- Faster rewrites, especially with Gemini: one connection is reused instead of a new
+  TCP+TLS handshake per request, and a per-provider **Thinking** setting is sent as
+  `reasoning_effort`. Gemini defaults to Off (fixes #1, idea and measurements by @mreduar in #2).
+- Gemini providers saved by 1.0 get the fast default automatically.
+- If a model rejects the Thinking setting, Quillbar retries without it instead of failing.
+- A connection dropped while the PC slept is retried once instead of showing a network error.
+
 ## 1.0 — 2026-10-07
 
 First public release.

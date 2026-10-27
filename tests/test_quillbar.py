@@ -88,7 +88,7 @@ def test_complete_against_fake_server(monkeypatch):
     def fake_post(url, headers, json, timeout):
         seen.update(url=url, headers=headers, body=json)
         return R()
-    monkeypatch.setattr(llm.requests, "post", fake_post)
+    monkeypatch.setattr(llm._HTTP, "post", fake_post)
     p = config.new_provider("DeepSeek")
     p["api_key"] = "k"
     out = llm.complete(p, "sys", "fix", "helo i am testting")
@@ -103,7 +103,7 @@ def test_error_message(monkeypatch):
         text = ""
         def json(self):
             return {"error": {"message": "Invalid key"}}
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(llm._HTTP, "post", lambda *a, **k: R())
     with pytest.raises(llm.LLMError, match="check API key"):
         llm.complete(config.new_provider(), "s", "i", "t")
 
@@ -134,7 +134,7 @@ def test_v1_fallback(monkeypatch):
         calls.append(url)
         return R(200 if "/v1/" in url else 404)
 
-    monkeypatch.setattr(llm.requests, "post", fake_post)
+    monkeypatch.setattr(llm._HTTP, "post", fake_post)
     p = config.new_provider("DMXAPI")
     p.update(base_url="https://www.dmxapi.cn", api_key="k")
     assert llm.complete(p, "s", "i", "t") == "Fixed."
@@ -152,7 +152,7 @@ def test_html_404_message(monkeypatch):
         def json(self):
             raise ValueError
 
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(llm._HTTP, "post", lambda *a, **k: R())
     p = config.new_provider()
     p.update(base_url="https://dmxapi.com/v1", api_key="k")
     with pytest.raises(llm.LLMError, match="web page"):
@@ -175,7 +175,7 @@ def test_www_fallback(monkeypatch):
         calls.append(url)
         return R(200 if url == "https://www.dmxapi.com/v1/chat/completions" else 404)
 
-    monkeypatch.setattr(llm.requests, "post", fake_post)
+    monkeypatch.setattr(llm._HTTP, "post", fake_post)
     p = config.new_provider()
     p.update(base_url="https://dmxapi.com/", api_key="k")
     assert llm.complete(p, "s", "i", "t") == "OK."
@@ -192,7 +192,7 @@ def test_no_channel_hint(monkeypatch):
         def json(self):
             return {"error": {"message": "No available channel for model gemini-2.0-flash"}}
 
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(llm._HTTP, "post", lambda *a, **k: R())
     with pytest.raises(llm.LLMError, match="Fetch models"):
         llm.complete(config.new_provider(), "s", "i", "t")
 
@@ -293,7 +293,7 @@ def test_stream_sse(monkeypatch):
         def iter_lines(self, decode_unicode=False):
             return iter(lines)
 
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(llm._HTTP, "post", lambda *a, **k: R())
     got = []
     out = llm.stream(_cfg().provider, "s", "i", "t", got.append)
     assert out == "Hello." and got == ["Hel", "lo."]
@@ -307,5 +307,134 @@ def test_stream_json_fallback(monkeypatch):
         def json(self):
             return {"choices": [{"message": {"content": "Whole."}}]}
 
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(llm._HTTP, "post", lambda *a, **k: R())
     assert llm.stream(_cfg().provider, "s", "i", "t", lambda d: None) == "Whole."
+
+
+# ---------------------------------------------------------------- issue #1: Gemini latency
+class _OK:
+    status_code = 200
+    headers = {"content-type": "application/json"}
+    text = ""
+
+    def json(self):
+        return {"choices": [{"message": {"content": "Done."}}]}
+
+
+def test_gemini_preset_turns_thinking_off(monkeypatch):
+    seen = []
+    monkeypatch.setattr(llm._HTTP, "post", lambda url, **k: seen.append(k["json"]) or _OK())
+    p = config.new_provider("Google Gemini")
+    p["api_key"] = "k"
+    assert llm.complete(p, "sys", "fix", "hola") == "Done."
+    assert seen[0]["reasoning_effort"] == "none"
+
+
+def test_other_presets_send_nothing_new():
+    for name in config.PROVIDER_PRESETS:
+        if name == "Google Gemini":
+            continue
+        body = llm._body(config.new_provider(name), "s", "i", "t", False)
+        assert "reasoning_effort" not in body, name
+
+
+def test_saved_1_0_gemini_provider_is_migrated(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({"providers": [
+        {"id": "g", "name": "Gemini", "model": "gemini-3.5-flash",
+         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"},
+        {"id": "o", "name": "OpenAI", "model": "gpt-4.1-mini",
+         "base_url": "https://api.openai.com/v1"},
+        {"id": "x", "name": "Mine", "model": "m", "reasoning_effort": "high",
+         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}]}))
+    eff = {p["id"]: p["reasoning_effort"] for p in config.Config.load(path)["providers"]}
+    assert eff == {"g": "none", "o": "", "x": "high"}  # user's explicit choice untouched
+
+
+def test_rejected_effort_retries_without_it_and_remembers(monkeypatch):
+    llm._NO_EFFORT.clear()
+    sent = []
+
+    class Bad:
+        status_code = 400
+        headers = {"content-type": "application/json"}
+        text = '{"error":{"message":"Invalid value for reasoning_effort. Valid: low, high"}}'
+
+        def json(self):
+            return json.loads(self.text)
+
+    def fake(url, **k):
+        sent.append(dict(k["json"]))
+        return Bad() if "reasoning_effort" in k["json"] else _OK()
+
+    monkeypatch.setattr(llm._HTTP, "post", fake)
+    p = config.new_provider("Google Gemini")
+    p.update(api_key="k", model="gemini-2.5-pro")
+    assert llm.complete(p, "s", "i", "t") == "Done."
+    assert [("reasoning_effort" in b) for b in sent] == [True, False]
+    sent.clear()
+    assert llm.complete(p, "s", "i", "t") == "Done."  # second call: no wasted round trip
+    assert [("reasoning_effort" in b) for b in sent] == [False]
+    llm._NO_EFFORT.clear()
+
+
+def test_unrelated_400_is_not_retried(monkeypatch):
+    llm._NO_EFFORT.clear()
+    calls = []
+
+    class Bad:
+        status_code = 400
+        headers = {"content-type": "application/json"}
+        text = '{"error":{"message":"Request contains an invalid argument: temperature"}}'
+
+        def json(self):
+            return json.loads(self.text)
+
+    monkeypatch.setattr(llm._HTTP, "post", lambda url, **k: calls.append(1) or Bad())
+    p = config.new_provider("Google Gemini")
+    p["api_key"] = "k"
+    with pytest.raises(llm.LLMError, match="temperature"):
+        llm.complete(p, "s", "i", "t")
+    assert len(calls) == 1
+
+
+def test_stale_connection_retried_once_but_timeout_is_not(monkeypatch):
+    n = []
+
+    def flaky(url, **k):
+        n.append(1)
+        if len(n) == 1:
+            raise llm.requests.ConnectionError("RemoteDisconnected")
+        return _OK()
+
+    monkeypatch.setattr(llm._HTTP, "post", flaky)
+    assert llm.complete(_cfg().provider, "s", "i", "t") == "Done."
+    assert len(n) == 2
+
+    n.clear()
+
+    def slow(url, **k):
+        n.append(1)
+        raise llm.requests.ConnectTimeout("slow")
+
+    monkeypatch.setattr(llm._HTTP, "post", slow)
+    with pytest.raises(llm.LLMError, match="timed out"):
+        llm.complete(_cfg().provider, "s", "i", "t")
+    assert len(n) == 1  # a timeout is not retried: the user already waited
+
+
+def test_streaming_also_sends_effort(monkeypatch):
+    seen = []
+
+    class SSE:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def iter_lines(self, decode_unicode=False):
+            return iter([b'data: {"choices":[{"delta":{"content":"Yo."}}]}', b"data: [DONE]"])
+
+    monkeypatch.setattr(llm._HTTP, "post", lambda url, **k: seen.append(k) or SSE())
+    p = config.new_provider("Google Gemini")
+    p["api_key"] = "k"
+    assert llm.stream(p, "s", "i", "t", lambda d: None) == "Yo."
+    assert seen[0]["json"]["reasoning_effort"] == "none" and seen[0]["stream"] is True
