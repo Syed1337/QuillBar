@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1 — unreleased
+## 1.0.1 — 2026-10-27
 
 - Faster rewrites, especially with Gemini: one connection is reused instead of a new
   TCP+TLS handshake per request, and a per-provider **Thinking** setting is sent as
